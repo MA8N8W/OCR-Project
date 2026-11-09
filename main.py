@@ -2,7 +2,7 @@ import os
 import sys
 import webbrowser
 
-from PyQt6.QtCore import QCoreApplication
+from PyQt6.QtCore import QCoreApplication, Qt
 
 from PyQt6.QtGui import QAction, QIcon
 
@@ -10,10 +10,14 @@ from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QLabel,
+    QFrame,
     QMainWindow,
     QStatusBar,
+    QSplitter,
     QToolBar,
     QFileDialog,
+    QVBoxLayout,
+    QGroupBox,
     QMessageBox,
 )
 
@@ -22,10 +26,37 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Document OCR")
+        self.setGeometry(100, 100, 800, 500)
 
         self.statusBar().showMessage("Welcome!")
 
         menu = self.menuBar()
+
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        left_panel_content = QLabel("Left Panel Content Here")
+        right_panel_content = QLabel("Right Panel Content Here")
+
+        left_panel_layout = QVBoxLayout()
+        right_panel_layout = QVBoxLayout()
+
+        left_panel = QGroupBox("Document")
+        left_panel.setLayout(left_panel_layout)
+        left_panel.layout().addWidget(left_panel_content)
+
+        right_panel = QGroupBox("OCR Result")
+        right_panel.setLayout(right_panel_layout)
+        right_panel.layout().addWidget(right_panel_content)
+
+        splitter.addWidget(left_panel)
+        splitter.addWidget(right_panel)
+
+        splitter.setSizes([400, 400])
+        splitter.setHandleWidth(1)
+
+        self.setCentralWidget(splitter)
+
 
         button_open = QAction("&Open", self)
         button_open.triggered.connect(self.open_triggered)
