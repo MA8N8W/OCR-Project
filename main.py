@@ -2,13 +2,13 @@ import os
 import sys
 import webbrowser
 
-from annotated_types import doc
+#from annotated_types import doc
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import (
     AcceleratorDevice,
     AcceleratorOptions,
     EasyOcrOptions,
-    OcrEngine,
+    #OcrEngine,
     OcrOptions,
     PdfPipelineOptions,
     RapidOcrOptions,
@@ -39,12 +39,14 @@ from PyQt6.QtWidgets import (
 class OcrWorker(QThread):
     finished = pyqtSignal(bool,str)
 
-    def __init__(self, input_path: str, output_path: str, selected_filter, selected_engine):
+    def __init__(self, input_path: str, output_path: str, selected_filter, selected_engine, selected_config):
         super().__init__()
         self.input_path = input_path
         self.output_path = output_path
         self.selected_filter = selected_filter
         self.selected_engine = selected_engine
+        self.selected_config = selected_config
+        #self.selected_lang = selected_lang
 
     def run(self):
         try:
@@ -53,20 +55,42 @@ class OcrWorker(QThread):
 
             if self.selected_engine == "TesseractCLI":
                 ocr_opts = TesseractCliOcrOptions(force_full_page_ocr=True)
+                device = AcceleratorDevice.CPU
             elif self.selected_engine == "EasyOCR":
-                ocr_opts = EasyOcrOptions(force_full_page_ocr=True)
+                use_cuda = self.selected_config == "cuda"
+                ocr_opts = EasyOcrOptions(
+                    force_full_page_ocr=True,
+                    use_gpu=use_cuda,
+                )
+                device = AcceleratorDevice.CUDA if use_cuda else AcceleratorDevice.CPU
             elif self.selected_engine == "RapidOCR":
+                '''ocr_opts = RapidOcrOptions(
+                    force_full_page_ocr=True,
+                    backend=self.selected_config
+                    lang=list(self.selected_lang)
+                )'''
+                rapid_params = {}
+                if self.selected_config == "openvino":
+                    rapid_params["EngineConfig.openvino.inference_num_threads"] = 4
+                    device = AcceleratorDevice.CPU
+                elif self.selected_config == "torch":
+                    device = AcceleratorDevice.CUDA
+                else:
+                    device = AcceleratorDevice.CPU
+
                 ocr_opts = RapidOcrOptions(
                     force_full_page_ocr=True,
-                    backend="openvino",
-                    rapidocr_params={
-                        "EngineConfig.openvino.inference_num_threads": 4
-                    },
+                    backend=self.selected_config,
+                    rapidocr_params=rapid_params,
                 )
             else:
                 raise ValueError(f"Unsupported OCR engine: {self.selected_engine}")
 
             pipeline_options.ocr_options = ocr_opts
+            pipeline_options.accelerator_options = AcceleratorOptions(
+                num_threads=4,
+                device=device,
+            )
 
             converter = DocumentConverter(
                 allowed_formats=[InputFormat.PDF],
@@ -187,12 +211,21 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(QLabel("OCR engine: "))
 
         self.engine_combo = QComboBox()
+        self.engine_combo.setFixedWidth(100)
         self.engine_combo.addItems([
             "TesseractCLI",
             "EasyOCR",
             "RapidOCR",
         ])
+        self.engine_combo.currentTextChanged.connect(self.on_engine_changed)
         toolbar.addWidget(self.engine_combo)
+
+        toolbar.addWidget(QLabel("Configuration:"))
+
+        self.config_combo = QComboBox()
+        self.config_combo.setFixedWidth(100)
+        self.config_combo.setDisabled(True)
+        toolbar.addWidget(self.config_combo)
 
     def open_triggered(self):
         input_path, _ = QFileDialog.getOpenFileName(
@@ -244,7 +277,7 @@ class MainWindow(QMainWindow):
             elif "Plain Text" in selected_filter and not output_path.endswith(".txt"):
                 output_path += ".txt"
 
-            self.worker = OcrWorker(self.input_path, output_path, selected_filter, self.engine_combo.currentText())
+            self.worker = OcrWorker(self.input_path, output_path, selected_filter, self.engine_combo.currentText(), self.config_combo.currentText().lower())
             self.worker.finished.connect(self.on_processing_complete)
             self.worker.start()
         
@@ -257,6 +290,22 @@ class MainWindow(QMainWindow):
 
     def about_triggered(self):
         QMessageBox.information(self, "Action", "Made by: KNR Stephan - MA8N8W\nPowered by: Python and PyQt6\n2026\n\nAllergy Notice: May contain traces of AI generated code.")
+
+    def on_engine_changed(self, engine_name: str):
+        self.config_combo.clear()
+        #if engine_name == "TesseractCLI":
+        if engine_name == "EasyOCR":
+            self.config_combo.addItems([
+                "CPU",
+                "CUDA",
+            ])
+        if engine_name == "RapidOCR":
+            self.config_combo.addItems([
+                "Torch",
+                "OpenVino",
+                "ONNXRuntime",
+            ])
+        self.config_combo.setEnabled(self.config_combo.count() > 1)
 
     def on_processing_complete(self, success, message):
         if success:
