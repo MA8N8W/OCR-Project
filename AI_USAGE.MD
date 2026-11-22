@@ -1,0 +1,1 @@
+AI Use Disclosure; some parts of this software were written with AI assistance, specifically Github Copilot.
