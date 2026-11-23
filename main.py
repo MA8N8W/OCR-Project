@@ -45,12 +45,6 @@ from PyQt6.QtWidgets import (
 
 from viewers import BaseViewer, InputViewer, MDViewer
 
-BASE_DIR = Path(__file__).resolve().parent
-PDFJS_VIEWER = BASE_DIR / "assets" / "pdfjs" / "web" / "viewer.html"
-
-# Pass str(PDFJS_VIEWER) into InputViewer
-#input_viewer = InputViewer(pdfjs_viewer_html=str(PDFJS_VIEWER))
-
 def get_app_root() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
@@ -171,20 +165,21 @@ class MainWindow(QMainWindow):
         self.fallback_color = palette.color(QPalette.ColorRole.Highlight)
         self.accent_hex = self.accent_color.name()
 
-        self.input_path = None
-        self.ocr_json_path = None
-        self.ocr_running = False
+        self.input_path: str | None = None
+        self.ocr_json_path: Path | None = None
+        self.ocr_running: bool = False
+        self.sync_scroll_enabled = False
         self._ocr_temp_dir = tempfile.TemporaryDirectory(prefix="docling-ocr-")
         self.config = Config()
         self.setWindowTitle("Document Scanning & Translation")
-        self.setGeometry(100, 100, 800, 500)
+        self.setGeometry(100, 100, 1400, 800)
 
         self.statusBar().showMessage("Welcome!")
 
         menu = self.menuBar()
 
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
 
         #left_panel_content = QLabel("Left Panel Content Here")
         #right_panel_content = QLabel("Right Panel Content Here")
@@ -206,13 +201,17 @@ class MainWindow(QMainWindow):
         #splitter.addWidget(right_panel)
 
         #splitter.setSizes([400, 400])
-        splitter.setHandleWidth(1)
+        self.splitter.setHandleWidth(1)
 
-        self.setCentralWidget(splitter)
+        self.setCentralWidget(self.splitter)
 
         button_open = QAction("&Open", self)
         button_open.triggered.connect(self.open_triggered)
         self.open_action = button_open
+
+        button_load_ocr_json = QAction("Load OCR JSON...", self)
+        button_load_ocr_json.triggered.connect(self.load_ocr_json_triggered)
+        self.load_ocr_json_action = button_load_ocr_json
 
         button_save = QAction("&Save", self)
         button_save.triggered.connect(self.save_triggered)
@@ -233,6 +232,7 @@ class MainWindow(QMainWindow):
 
         file_menu = menu.addMenu("&File")
         file_menu.addAction(button_open)
+        file_menu.addAction(button_load_ocr_json)
         file_menu.addAction(button_save)
         file_menu.addSeparator()
         file_menu.addAction(button_exit)
@@ -279,8 +279,50 @@ class MainWindow(QMainWindow):
         self.view_button_3.setFixedWidth(25)
         self.view_button_4 = QPushButton("4")
         self.view_button_4.setFixedWidth(25)
+        self.view_button_1.setCheckable(True)
+        self.view_button_1.setChecked(True)
+        self.view_button_2.setCheckable(True)
+        self.view_button_3.setCheckable(True)
+        self.view_button_4.setCheckable(True)
         self.view_synced_scrolling = QPushButton("Synced Scrolling")
+        self.view_synced_scrolling.setCheckable(True)
+        self.view_synced_scrolling.setChecked(False)
+        self.view_synced_scrolling.toggled.connect(self._toggle_sync_scroll)
 
+        self.input_viewer = InputViewer()
+        self.ocr_viewer = MDViewer("ocr", "2. OCR Output")
+        self.translation_viewer = MDViewer("mt", "3. Initial Translation")
+        self.verification_viewer = MDViewer("llm", "4. LLM Verified Translation")
+        self.viewers: dict[str, BaseViewer] = {
+            "input": self.input_viewer,
+            "ocr": self.ocr_viewer,
+            "mt": self.translation_viewer,
+            "llm": self.verification_viewer,
+        }
+        self.view_toggle_buttons: dict[str, QPushButton] = {
+            "input": self.view_button_1,
+            "ocr": self.view_button_2,
+            "mt": self.view_button_3,
+            "llm": self.view_button_4,
+        }
+        self.md_viewers: list[MDViewer] = [
+            self.ocr_viewer,
+            self.translation_viewer,
+            self.verification_viewer,
+        ]
+        self.md_viewers_by_stage: dict[str, MDViewer] = {
+            viewer.stage_id: viewer for viewer in self.md_viewers
+        }
+
+        for stage_id, viewer in self.viewers.items():
+            self.splitter.addWidget(viewer)
+            viewer.closed_requested.connect(self._sync_view_toggle)
+            self.view_toggle_buttons[stage_id].toggled.connect(viewer.setVisible)
+            viewer.setVisible(self.view_toggle_buttons[stage_id].isChecked())
+        self.splitter.setSizes([500, 300, 300, 300])
+
+        for markdown_viewer in self.md_viewers:
+            markdown_viewer.scroll_block_changed.connect(self._on_md_scrolled)
 
         toolbar_groupbox_ocr = QGroupBox("Optical Character Recognition")
         toolbar_groupbox_ocr.setLayout(QGridLayout())
@@ -335,15 +377,23 @@ class MainWindow(QMainWindow):
         if self.ocr_running:
             return
 
-        self.ocr_json_path = None
-        output_path = Path(self._ocr_temp_dir.name) / "ocr-result.json"
+        self._clear_output_stages()
+        with tempfile.NamedTemporaryFile(
+            dir=self._ocr_temp_dir.name,
+            prefix="ocr-result-",
+            suffix=".json",
+            delete=False,
+        ) as json_file:
+            output_path = json_file.name
+
         self.ocr_running = True
         self._update_ocr_button_state()
         self.open_action.setEnabled(False)
+        self.load_ocr_json_action.setEnabled(False)
 
         self.ocr_worker = OCRWorker(
             self.input_path,
-            str(output_path),
+            output_path,
             self.ocr_engine_combo.currentText(),
             self.ocr_config_combo.currentText().lower(),
         )
@@ -364,21 +414,79 @@ class MainWindow(QMainWindow):
             "PDF Files (*.pdf);;Image Files (*.bmp *.png *.jpg *.jpeg *.webp *.tiff);;All Files (*)"
         )
 
-        self.save_action.setEnabled(bool(input_path))
-
         if not input_path:
             print("User cancelled the dialog.") 
-            self.statusBar().showMessage("No file selected")
-            self.input_path = None
-            self.ocr_json_path = None
-            self._update_ocr_button_state()
+            self.statusBar().showMessage("Current document unchanged")
             return
-        else:
-            print(f"Selected file: {input_path}")
-            self.statusBar().showMessage("File selected: " + input_path)
-            self.input_path = input_path
-            self.ocr_json_path = None
-            self._update_ocr_button_state()
+
+        print(f"Selected file: {input_path}")
+        self.statusBar().showMessage("File selected: " + input_path)
+        self.input_path = input_path
+        self.input_viewer.load_file(input_path)
+        self._clear_output_stages()
+        self.save_action.setEnabled(True)
+        self._update_ocr_button_state()
+
+    def load_ocr_json_triggered(self):
+        json_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load OCR JSON",
+            "",
+            "Docling JSON (*.json);;All Files (*)",
+        )
+
+        if not json_path:
+            self.statusBar().showMessage("No OCR JSON loaded")
+            return
+
+        try:
+            document = self._load_docling_document(json_path)
+            markdown = document.export_to_markdown()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not load OCR JSON: {e}")
+            self.statusBar().showMessage(f"Could not load OCR JSON: {e}")
+            return
+
+        self._clear_output_stages()
+        self.ocr_json_path = Path(json_path)
+        self._set_markdown_stage_content("ocr", markdown)
+        self.save_action.setEnabled(True)
+        self.statusBar().showMessage("OCR JSON loaded: " + json_path)
+
+    def _load_docling_document(self, json_path: str | Path):
+        result = DocumentConverter(
+            allowed_formats=[InputFormat.JSON_DOCLING]
+        ).convert(str(json_path))
+        return result.document
+
+    def _set_markdown_stage_content(self, stage_id: str, markdown: str):
+        self.md_viewers_by_stage[stage_id].set_content(markdown)
+
+    def _clear_output_stages(self):
+        self.ocr_json_path = None
+        for stage_id in ("ocr", "mt", "llm"):
+            self.md_viewers_by_stage[stage_id].set_content("")
+
+    def _sync_view_toggle(self, stage_id: str):
+        button = self.view_toggle_buttons.get(stage_id)
+        if button is not None:
+            button.setChecked(False)
+
+    def _toggle_sync_scroll(self, checked: bool):
+        self.sync_scroll_enabled = checked
+
+    def _on_md_scrolled(self, source_id: str, block_num: int, intra_ratio: float):
+        if not self.sync_scroll_enabled:
+            return
+
+        source_viewer = self.md_viewers_by_stage.get(source_id)
+        if source_viewer is None:
+            return
+
+        source_total = source_viewer.browser.document().blockCount()
+        for target_viewer in self.md_viewers:
+            if target_viewer is not source_viewer and target_viewer.isVisible():
+                target_viewer.sync_to_block(block_num, source_total, intra_ratio)
 
     def save_triggered(self):
         if self.ocr_json_path is None:
@@ -417,11 +525,19 @@ class MainWindow(QMainWindow):
             elif "JSON Document Structure" in selected_filter and not output_path.endswith(".json"):
                 output_path += ".json"
 
+            if (
+                "JSON Document Structure" in selected_filter
+                and Path(output_path).resolve() == self.ocr_json_path.resolve()
+            ):
+                QMessageBox.warning(
+                    self,
+                    "Source JSON",
+                    "Choose a different destination to keep the loaded OCR JSON unchanged.",
+                )
+                return
+
             try:
-                result = DocumentConverter(
-                    allowed_formats=[InputFormat.JSON_DOCLING]
-                ).convert(str(self.ocr_json_path))
-                document = result.document
+                document = self._load_docling_document(self.ocr_json_path)
 
                 if "Plain Text" in selected_filter:
                     Path(output_path).write_text(
@@ -479,14 +595,24 @@ class MainWindow(QMainWindow):
     def on_ocr_complete(self, success, result):
         self.ocr_running = False
         if success:
-            self.ocr_json_path = Path(result)
-            QMessageBox.information(self, "Success", "OCR processing completed successfully.")
-            self.statusBar().showMessage("OCR processing completed successfully.")
+            try:
+                document = self._load_docling_document(result)
+                markdown = document.export_to_markdown()
+            except Exception as e:
+                self.ocr_json_path = None
+                QMessageBox.critical(self, "Error", f"OCR result could not be loaded: {e}")
+                self.statusBar().showMessage(f"OCR result could not be loaded: {e}")
+            else:
+                self.ocr_json_path = Path(result)
+                self._set_markdown_stage_content("ocr", markdown)
+                QMessageBox.information(self, "Success", "OCR processing completed successfully.")
+                self.statusBar().showMessage("OCR processing completed successfully.")
         else:
             self.ocr_json_path = None
             QMessageBox.critical(self, "Error", f"OCR processing failed: {result}")
             self.statusBar().showMessage(f"OCR processing failed: {result}")
         self.open_action.setEnabled(True)
+        self.load_ocr_json_action.setEnabled(True)
         self._update_ocr_button_state()
 
 if __name__ == "__main__":

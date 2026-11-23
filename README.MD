@@ -1,3 +1,7 @@
-The exact scope is as of yet not fully planned out.
+This application will be a scanned document converter and translator, currently only the OCR is implemented.
+![screenshot](screenshots/screenshot-1.png)
 
-The goal is a two-panel OCR based document scanner, written in Python using Docling for the underlying OCR and PyQt6 for the GUI.
+
+The application uses Python, PyQt6 and Docling.
+
+The PDF reader is a PyQt6 compatible build (https://github.com/digidigital/pdfjs-viewer-pyqt6) by DigiDigital based on Mozilla's PDF.js

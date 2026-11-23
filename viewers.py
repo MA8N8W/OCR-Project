@@ -1,8 +1,7 @@
-import os
 import sys
 from pathlib import Path
 
-from PyQt6.QtCore import QPoint, Qt, QUrl, pyqtSignal
+from PyQt6.QtCore import QPoint, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QAction,
     QGuiApplication,
@@ -12,8 +11,6 @@ from PyQt6.QtGui import (
     QTextCursor,
     QWheelEvent,
 )
-from PyQt6.QtWebEngineCore import QWebEngineSettings
-from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -37,6 +34,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from pdfjs_viewer import PDFViewerWidget
 
 
 class BaseViewer(QWidget):
@@ -230,11 +228,10 @@ class MDViewer(BaseViewer):
             self._is_syncing = False
 
 class InputViewer(BaseViewer):
-    """Switches seamlessly between QGraphicsView (images) and PDF.js (PDFs)."""
+    """Switches seamlessly between QGraphicsView (images) and the bundled PDF.js widget."""
 
-    def __init__(self, pdfjs_viewer_html: str, parent=None):
+    def __init__(self, parent=None):
         super().__init__("input", "1. Source Document", parent)
-        self.pdfjs_viewer_html = pdfjs_viewer_html
 
         self.stack = QStackedWidget()
 
@@ -242,15 +239,8 @@ class InputViewer(BaseViewer):
         self.image_view = ZoomableImageCanvas()
         self.stack.addWidget(self.image_view)
 
-        # Page 1: PDF.js WebEngine Viewer
-        self.pdf_view = QWebEngineView()
-        settings = self.pdf_view.settings()
-        settings.setAttribute(
-            QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True
-        )
-        settings.setAttribute(
-            QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True
-        )
+        # Page 1: bundled PDF.js widget
+        self.pdf_view = PDFViewerWidget(preset="kiosk")
         self.stack.addWidget(self.pdf_view)
 
         self.set_content_widget(self.stack)
@@ -259,11 +249,7 @@ class InputViewer(BaseViewer):
         ext = Path(file_path).suffix.lower()
         if ext == ".pdf":
             self.stack.setCurrentWidget(self.pdf_view)
-            # Load PDF.js viewer.html with ?file= query parameter
-            pdf_uri = QUrl.fromLocalFile(os.path.abspath(file_path)).toString()
-            viewer_url = QUrl.fromLocalFile(os.path.abspath(self.pdfjs_viewer_html))
-            viewer_url.setQuery(f"file={pdf_uri}")
-            self.pdf_view.load(viewer_url)
+            self.pdf_view.load_pdf(file_path)
         else:
             self.stack.setCurrentWidget(self.image_view)
             self.image_view.load_image(file_path)
@@ -297,7 +283,7 @@ class MainWindow(QMainWindow):
 
         # Instantiate the 4 views (ensure BaseStageViewer matches your base class name)
         self.viewers: dict[str, BaseViewer] = {
-            "view_input": InputViewer(pdfjs_viewer_html="assets/pdfjs/web/viewer.html"),
+            "view_input": InputViewer(),
             "view_ocr": MDViewer("ocr", "OCR Output"),
             "view_translation": MDViewer("mt", "Initial Translation"),
             "view_verification": MDViewer("llm", "LLM Verified Translation"),
