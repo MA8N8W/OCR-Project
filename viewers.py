@@ -277,7 +277,7 @@ class MainWindow(QMainWindow):
         self.resize(1400, 800)
 
         self.sync_scroll_enabled = True
-        self.sync_btn = QPushButton("🔗 Sync Scroll")
+        self.sync_btn = QPushButton("Synced Scrolling")
         self.sync_btn.setCheckable(True)
         self.sync_btn.setChecked(True)
         self.sync_btn.toggled.connect(self._toggle_sync_scroll)
@@ -297,10 +297,10 @@ class MainWindow(QMainWindow):
 
         # Instantiate the 4 views (ensure BaseStageViewer matches your base class name)
         self.viewers: dict[str, BaseViewer] = {
-            "input": InputViewer(pdfjs_viewer_html="assets/pdfjs/web/viewer.html"),
-            "ocr": MDViewer("ocr", "2. OCR Output"),
-            "mt": MDViewer("mt", "3. Initial Translation"),
-            "llm": MDViewer("llm", "4. LLM Verified Translation"),
+            "view_input": InputViewer(pdfjs_viewer_html="assets/pdfjs/web/viewer.html"),
+            "view_ocr": MDViewer("ocr", "OCR Output"),
+            "view_translation": MDViewer("mt", "Initial Translation"),
+            "view_verification": MDViewer("llm", "LLM Verified Translation"),
         }
 
         self.toggle_buttons: dict[str, QPushButton] = {}
@@ -318,17 +318,17 @@ class MainWindow(QMainWindow):
 
         # Wire up synchronized scrolling across the 3 MDViewers
         self.md_viewers: list[MDViewer] = [
-            self.viewers["ocr"],
-            self.viewers["mt"],
-            self.viewers["llm"],
+            self.viewers["view_ocr"],
+            self.viewers["view_translation"],
+            self.viewers["view_verification"],
         ]
         for md_view in self.md_viewers:
             md_view.scroll_block_changed.connect(self._on_md_scrolled)
 
         # Populate sample Markdown data
-        self.viewers["ocr"].set_content("# OCR Result\n\nExtracted text from **Docling**.")
-        self.viewers["mt"].set_content("# Machine Translation\n\nNon-context-aware output.")
-        self.viewers["llm"].set_content("# Verified Output\n\nContext-aware **LLM pass**.")
+        self.viewers["view_ocr"].set_content("# OCR Result\n\nExtracted text from **Docling**.")
+        self.viewers["view_translation"].set_content("# Machine Translation\n\nNon-context-aware output.")
+        self.viewers["view_verification"].set_content("# Verified Output\n\nContext-aware **LLM pass**.")
 
     def _sync_toggle_button(self, stage_id: str):
         self.toggle_buttons[stage_id].setChecked(False)

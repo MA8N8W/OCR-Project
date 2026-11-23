@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 import webbrowser
 from pathlib import Path
 
@@ -15,7 +16,11 @@ from docling.datamodel.pipeline_options import (
     RapidOcrOptions,
     TesseractCliOcrOptions,
 )
-from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling.document_converter import (
+    DocumentConverter,
+    ImageFormatOption,
+    PdfFormatOption,
+)
 from PyQt6.QtCore import QCoreApplication, QSettings, Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QAction, QGuiApplication, QIcon, QPalette
 from PyQt6.QtWidgets import (
@@ -38,7 +43,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-#from viewers import InputViewer, MDViewer
+from viewers import BaseViewer, InputViewer, MDViewer
 
 BASE_DIR = Path(__file__).resolve().parent
 PDFJS_VIEWER = BASE_DIR / "assets" / "pdfjs" / "web" / "viewer.html"
@@ -61,13 +66,12 @@ class Config:
         return self.ini_path.is_file()
 
 class OCRWorker(QThread):
-    finished = pyqtSignal(bool,str)
+    completed = pyqtSignal(bool, str)
 
-    def __init__(self, input_path: str, output_path: str, selected_filter, selected_engine, selected_config):
+    def __init__(self, input_path: str, output_path: str, selected_engine, selected_config):
         super().__init__()
         self.input_path = input_path
         self.output_path = output_path
-        self.selected_filter = selected_filter
         self.selected_engine = selected_engine
         self.selected_config = selected_config
         #self.selected_lang = selected_lang
@@ -120,41 +124,32 @@ class OCRWorker(QThread):
             )
 
             converter = DocumentConverter(
-                allowed_formats=[InputFormat.PDF],
+                allowed_formats=[InputFormat.PDF, InputFormat.IMAGE],
                 format_options={
                     InputFormat.PDF: PdfFormatOption(
                         pipeline_options=pipeline_options
-                    )
+                    ),
+                    InputFormat.IMAGE: ImageFormatOption(
+                        pipeline_options=pipeline_options
+                    ),
                 },
             )
 
             result = converter.convert(self.input_path)
-            doc = result.document
-
-            if "Plain Text" in self.selected_filter:
-                with open(self.output_path, "w", encoding="utf-8") as f:
-                    f.write(doc.export_to_text())
-
-            elif "Markdown" in self.selected_filter:
-                with open(self.output_path, "w", encoding="utf-8") as f:
-                    f.write(doc.export_to_markdown())
-
-            elif "HTML" in self.selected_filter:
-                with open(self.output_path, "w", encoding="utf-8") as f:
-                    f.write(doc.export_to_html())
-
-            elif "JSON Document Structure" in self.selected_filter:
-                import json
-                #with open(self.output_path, "w", encoding="utf-8") as f:
-                #    f.write(doc.export_to_dict())
-
-                with open(self.output_path, "w", encoding="utf-8") as f:
-                    json.dump(doc.export_to_dict(), f, ensure_ascii=False, indent=2)
-
-
-            self.finished.emit(True, "Success")
+            result.document.save_as_json(self.output_path)
+            self.completed.emit(True, self.output_path)
         except Exception as e:
-            self.finished.emit(False, str(e))
+            output_path = Path(self.output_path)
+            try:
+                if output_path.exists():
+                    output_path.unlink()
+            except OSError as cleanup_error:
+                self.completed.emit(
+                    False,
+                    f"{e}; failed to remove incomplete OCR JSON: {cleanup_error}",
+                )
+            else:
+                self.completed.emit(False, str(e))
 
 class TranslationWorker(QThread):
     finished = pyqtSignal(bool,str)
@@ -177,6 +172,9 @@ class MainWindow(QMainWindow):
         self.accent_hex = self.accent_color.name()
 
         self.input_path = None
+        self.ocr_json_path = None
+        self.ocr_running = False
+        self._ocr_temp_dir = tempfile.TemporaryDirectory(prefix="docling-ocr-")
         self.config = Config()
         self.setWindowTitle("Document Scanning & Translation")
         self.setGeometry(100, 100, 800, 500)
@@ -188,34 +186,38 @@ class MainWindow(QMainWindow):
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        left_panel_content = QLabel("Left Panel Content Here")
-        right_panel_content = QLabel("Right Panel Content Here")
+        #left_panel_content = QLabel("Left Panel Content Here")
+        #right_panel_content = QLabel("Right Panel Content Here")
 
-        left_panel_layout = QVBoxLayout()
-        right_panel_layout = QVBoxLayout()
+        #left_panel_layout = QVBoxLayout()
+        #right_panel_layout = QVBoxLayout()
 
-        left_panel = QGroupBox("Document")
-        left_panel.setLayout(left_panel_layout)
-        left_panel.layout().addWidget(left_panel_content)
+        #left_panel = QGroupBox("Document")
+        #left_panel.setLayout(left_panel_layout)
+        #left_panel.layout().addWidget(left_panel_content)
 
-        right_panel = QGroupBox("OCR Result")
-        right_panel.setLayout(right_panel_layout)
-        right_panel.layout().addWidget(right_panel_content)
+        #right_panel = QGroupBox("OCR Result")
+        #right_panel.setLayout(right_panel_layout)
+        #right_panel.layout().addWidget(right_panel_content)
 
-        splitter.addWidget(left_panel)
-        splitter.addWidget(right_panel)
 
-        splitter.setSizes([400, 400])
+
+        #splitter.addWidget(left_panel)
+        #splitter.addWidget(right_panel)
+
+        #splitter.setSizes([400, 400])
         splitter.setHandleWidth(1)
 
         self.setCentralWidget(splitter)
 
         button_open = QAction("&Open", self)
         button_open.triggered.connect(self.open_triggered)
+        self.open_action = button_open
 
         button_save = QAction("&Save", self)
         button_save.triggered.connect(self.save_triggered)
         button_save.setDisabled(True)
+        self.save_action = button_save
 
         button_exit = QAction("&Exit", self)
         button_exit.triggered.connect(QApplication.instance().quit)
@@ -259,6 +261,7 @@ class MainWindow(QMainWindow):
         self.ocr_hint_combo.setDisabled(True)
 
         self.ocr_start_button = QPushButton("Start")
+        self.ocr_start_button.clicked.connect(self.start_ocr_clicked)
         self.ocr_start_button.setDisabled(True)
         
         self.translation_language_combo = QComboBox()
@@ -267,6 +270,17 @@ class MainWindow(QMainWindow):
 
         self.translation_start_button = QPushButton("Start")
         self.translation_start_button.setDisabled(True)
+
+        self.view_button_1 = QPushButton("1")
+        self.view_button_1.setFixedWidth(25)
+        self.view_button_2 = QPushButton("2")
+        self.view_button_2.setFixedWidth(25)
+        self.view_button_3 = QPushButton("3")
+        self.view_button_3.setFixedWidth(25)
+        self.view_button_4 = QPushButton("4")
+        self.view_button_4.setFixedWidth(25)
+        self.view_synced_scrolling = QPushButton("Synced Scrolling")
+
 
         toolbar_groupbox_ocr = QGroupBox("Optical Character Recognition")
         toolbar_groupbox_ocr.setLayout(QGridLayout())
@@ -288,6 +302,17 @@ class MainWindow(QMainWindow):
         toolbar_groupbox_translation.layout().addWidget(self.translation_language_combo, 1, 0)
         toolbar_groupbox_translation.layout().addWidget(self.translation_start_button, 1, 1)
 
+        toolbar_groupbox_views = QGroupBox("Views")
+        toolbar_groupbox_views.setLayout(QHBoxLayout())
+        #toolbar_groupbox_views.layout().setContentsMargins(8, 0, 8, 8)
+        #toolbar_groupbox_views.layout().setVerticalSpacing(1)
+        toolbar_groupbox_views.layout().addWidget(self.view_button_1)
+        toolbar_groupbox_views.layout().addWidget(self.view_button_2)
+        toolbar_groupbox_views.layout().addWidget(self.view_button_3)
+        toolbar_groupbox_views.layout().addWidget(self.view_button_4)
+        toolbar_groupbox_views.layout().addWidget(self.view_synced_scrolling)
+
+
 
         toolbar = self.addToolBar("Main Toolbar")
         #toolbar.layout().setContentsMargins(10, 5, 10, 5)  # Left, Top, Right, Bottom padding (in pixels)
@@ -295,8 +320,41 @@ class MainWindow(QMainWindow):
         #toolbar.addWidget(QLabel("OCR engine: "))
         toolbar.addWidget(toolbar_groupbox_ocr)
         toolbar.addWidget(toolbar_groupbox_translation)
+        toolbar.addWidget(toolbar_groupbox_views)
 
-        
+
+    def start_ocr_clicked(self):
+        if not self.input_path or not self.ocr_engine_combo.currentText():
+            QMessageBox.warning(
+                self,
+                "OCR unavailable",
+                "Select an input file and OCR engine before starting OCR.",
+            )
+            return
+
+        if self.ocr_running:
+            return
+
+        self.ocr_json_path = None
+        output_path = Path(self._ocr_temp_dir.name) / "ocr-result.json"
+        self.ocr_running = True
+        self._update_ocr_button_state()
+        self.open_action.setEnabled(False)
+
+        self.ocr_worker = OCRWorker(
+            self.input_path,
+            str(output_path),
+            self.ocr_engine_combo.currentText(),
+            self.ocr_config_combo.currentText().lower(),
+        )
+        self.ocr_worker.completed.connect(self.on_ocr_complete)
+        self.ocr_worker.start()
+
+    def _update_ocr_button_state(self):
+        self.ocr_start_button.setEnabled(
+            bool(self.input_path and self.ocr_engine_combo.currentText())
+            and not self.ocr_running
+        )
 
     def open_triggered(self):
         input_path, _ = QFileDialog.getOpenFileName(
@@ -306,20 +364,31 @@ class MainWindow(QMainWindow):
             "PDF Files (*.pdf);;Image Files (*.bmp *.png *.jpg *.jpeg *.webp *.tiff);;All Files (*)"
         )
 
-        button_save = self.menuBar().actions()[0].menu().actions()[1]  # Access the Save action
-        button_save.setEnabled(bool(input_path))  # Enable Save if a file is selected
+        self.save_action.setEnabled(bool(input_path))
 
         if not input_path:
             print("User cancelled the dialog.") 
             self.statusBar().showMessage("No file selected")
             self.input_path = None
+            self.ocr_json_path = None
+            self._update_ocr_button_state()
             return
         else:
             print(f"Selected file: {input_path}")
             self.statusBar().showMessage("File selected: " + input_path)
             self.input_path = input_path
+            self.ocr_json_path = None
+            self._update_ocr_button_state()
 
     def save_triggered(self):
+        if self.ocr_json_path is None:
+            QMessageBox.warning(
+                self,
+                "No OCR output",
+                "Run OCR before saving an output file.",
+            )
+            return
+
         filters = (
             "Plain Text (*.txt);;"
             "Markdown Document (*.md);;"
@@ -339,9 +408,6 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("No file saved")
             return
         else:
-            print(f"Selected save path: {output_path}")
-            self.statusBar().showMessage("File saved: " + output_path)
-
             if "Plain Text" in selected_filter and not output_path.endswith(".txt"):
                 output_path += ".txt"
             elif "Markdown" in selected_filter and not output_path.endswith(".md"):
@@ -351,9 +417,38 @@ class MainWindow(QMainWindow):
             elif "JSON Document Structure" in selected_filter and not output_path.endswith(".json"):
                 output_path += ".json"
 
-            self.worker = OCRWorker(self.input_path, output_path, selected_filter, self.ocr_engine_combo.currentText(), self.ocr_config_combo.currentText().lower())
-            self.worker.finished.connect(self.on_processing_complete)
-            self.worker.start()
+            try:
+                result = DocumentConverter(
+                    allowed_formats=[InputFormat.JSON_DOCLING]
+                ).convert(str(self.ocr_json_path))
+                document = result.document
+
+                if "Plain Text" in selected_filter:
+                    Path(output_path).write_text(
+                        document.export_to_text(),
+                        encoding="utf-8",
+                    )
+                elif "Markdown" in selected_filter:
+                    Path(output_path).write_text(
+                        document.export_to_markdown(),
+                        encoding="utf-8",
+                    )
+                elif "HTML" in selected_filter:
+                    Path(output_path).write_text(
+                        document.export_to_html(),
+                        encoding="utf-8",
+                    )
+                elif "JSON Document Structure" in selected_filter:
+                    document.save_as_json(output_path)
+                else:
+                    raise ValueError(f"Unsupported output format: {selected_filter}")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Saving failed: {e}")
+                self.statusBar().showMessage(f"Saving failed: {e}")
+                return
+
+            print(f"Selected save path: {output_path}")
+            self.statusBar().showMessage("File saved: " + output_path)
         
     def home_triggered(self):
         webbrowser.open("https://github.com/MA8N8W/OCR-Project")
@@ -364,29 +459,35 @@ class MainWindow(QMainWindow):
     def about_triggered(self):
         QMessageBox.information(self, "Action", "Made by: KNR Stephan - MA8N8W\nPowered by: Python and PyQt6\n2026\n\nContains AI Generated Code")
 
-    def on_engine_changed(self, engine_name: str):
+    def on_engine_changed(self, ocr_engine_name: str):
         self.ocr_config_combo.clear()
         #if engine_name == "TesseractCLI":
-        if engine_name == "EasyOCR":
+        if ocr_engine_name == "EasyOCR":
             self.ocr_config_combo.addItems([
                 "CPU",
                 "CUDA",
             ])
-        if engine_name == "RapidOCR":
+        if ocr_engine_name == "RapidOCR":
             self.ocr_config_combo.addItems([
                 "Torch",
                 "OpenVino",
                 "ONNXRuntime",
             ])
         self.ocr_config_combo.setEnabled(self.ocr_config_combo.count() > 1)
+        self._update_ocr_button_state()
 
-    def on_processing_complete(self, success, message):
+    def on_ocr_complete(self, success, result):
+        self.ocr_running = False
         if success:
+            self.ocr_json_path = Path(result)
             QMessageBox.information(self, "Success", "OCR processing completed successfully.")
             self.statusBar().showMessage("OCR processing completed successfully.")
         else:
-            QMessageBox.critical(self, "Error", f"OCR processing failed: {message}")
-            self.statusBar().showMessage(f"OCR processing failed: {message}")
+            self.ocr_json_path = None
+            QMessageBox.critical(self, "Error", f"OCR processing failed: {result}")
+            self.statusBar().showMessage(f"OCR processing failed: {result}")
+        self.open_action.setEnabled(True)
+        self._update_ocr_button_state()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
